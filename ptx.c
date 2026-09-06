@@ -10,8 +10,9 @@
 #include <signal.h>
 #include <string.h>
 
-#define COLS 80
-#define ROWS 24
+// Mutable globals to hold active terminal grid size dimensions
+int current_cols = 80;
+int current_rows = 24;
 #define FONT_SIZE 16.0f
 
 typedef struct {
@@ -38,35 +39,28 @@ static VTermScreenCallbacks screen_callbacks = {
     .moverect = screen_moverect,
 };
 
-// --- 2. ASYNCHRONOUS PTY READER THREAD ENGINE ---
+// --- 2. ASYNCHRONOUS PTY READER THREAD ---
 static int pty_read_worker(void *data) {
     TerminalApp *app = (TerminalApp *)data;
-    char read_buffer[4096]; // Increased buffer size for fast stream chunks
+    char read_buffer[1024];
     
-    printf("[DEBUG] PTY Reader Thread started safely.\n");
     while (app->running) {
         ssize_t bytes_read = read(app->pty_master, read_buffer, sizeof(read_buffer));
         if (bytes_read <= 0) {
-            printf("[DEBUG] PTY Read <= 0. Shell process likely closed.\n");
             app->running = false;
             break;
         }
-        
-        // Pass stream blocks directly into libvterm state engines
         vterm_input_write(app->vterm, read_buffer, bytes_read);
     }
     return 0;
 }
 
-// --- 3. MACOS PROCESS SPAWNER (zsh Integration) ---
+// --- 3. PROCESS SPAWNER ---
 bool spawn_native_zsh_process(TerminalApp *app) {
-    struct winsize ws = { .ws_row = ROWS, .ws_col = COLS };
+    struct winsize ws = { .ws_row = current_rows, .ws_col = current_cols };
     
     app->shell_pid = forkpty(&app->pty_master, NULL, NULL, &ws);
-    if (app->shell_pid < 0) {
-        printf("[ERROR] forkpty failed.\n");
-        return false;
-    }
+    if (app->shell_pid < 0) return false;
     
     if (app->shell_pid == 0) {
         setenv("TERM", "xterm-256color", 1);
@@ -74,29 +68,27 @@ bool spawn_native_zsh_process(TerminalApp *app) {
         exit(EXIT_FAILURE);
     }
     
-    printf("[DEBUG] Spawned zsh with PID: %d, Master FD: %d\n", app->shell_pid, app->pty_master);
     app->read_thread = SDL_CreateThread(pty_read_worker, "PTY_Reader", app);
     return true;
 }
 
-// Helper to convert Unicode Code Points from libvterm into clean UTF-8 string bytes
 static int write_utf8(uint32_t cp, char *out) {
     if (cp < 0x80) { out[0] = (char)cp; return 1; }
     else if (cp < 0x800) { out[0] = (char)((cp >> 6) | 0xC0); out[1] = (char)((cp & 0x3F) | 0x80); return 2; }
-    else if (cp < 0x10000) { out[0] = (char)((cp >> 12) | 0xE0); out[1] = (char)(((cp >> 6) & 0x3F) | 0x80); out[2] = (char)((cp & 0x3F) | 0x80); return 3; }
     return 0;
 }
 
-// --- 4. OPTIMIZED HIGH-PERFORMANCE RENDER DRIVER ---
+// --- 4. RENDER ENGINE WITH LAYOUT SCALING & BLINKING CURSOR ---
 void render_terminal_cells(TerminalApp *app) {
-    SDL_SetRenderDrawColor(app->renderer, 30, 30, 30, 255); // Adwaita Dark Slate
+    SDL_SetRenderDrawColor(app->renderer, 30, 30, 30, 255); 
     SDL_RenderClear(app->renderer);
 
     int glyph_w = 0, glyph_h = 0;
     TTF_GetStringSize(app->font, "A", 0, &glyph_w, &glyph_h);
 
-    for (int row = 0; row < ROWS; row++) {
-        for (int col = 0; col < COLS; col++) {
+    // Render Text Character Grids up to the newly scaled terminal bounds
+    for (int row = 0; row < current_rows; row++) {
+        for (int col = 0; col < current_cols; col++) {
             VTermPos pos = { .row = row, .col = col };
             VTermScreenCell cell;
             
@@ -105,24 +97,20 @@ void render_terminal_cells(TerminalApp *app) {
             float target_x = (float)(col * glyph_w);
             float target_y = (float)(row * glyph_h);
 
-            // Draw custom backgrounds if specified
             if (cell.bg.type != VTERM_COLOR_DEFAULT_BG) {
                 SDL_FRect cell_rect = { target_x, target_y, (float)glyph_w, (float)glyph_h };
                 SDL_SetRenderDrawColor(app->renderer, cell.bg.rgb.red, cell.bg.rgb.green, cell.bg.rgb.blue, 255);
                 SDL_RenderFillRect(app->renderer, &cell_rect);
             }
 
-            // Fix the array check: `cell.chars` is an array. If `cell.chars[0] == 0`, the slot is empty.
             if (cell.chars[0] == 0) continue;
 
-            char utf8_payload[7] = {0};
+            char utf8_payload[6] = {0};
             int offset = 0;
             for(int i = 0; i < 6 && cell.chars[i]; i++) {
                 offset += write_utf8(cell.chars[i], utf8_payload + offset);
             }
 
-            // PERFORMANCE FIX: Instead of keeping hundreds of permanent overhead objects on the heap,
-            // render text immediately using SDL3_ttf's stack rendering optimizations.
             TTF_Text *text_obj = TTF_CreateText(app->text_engine, app->font, utf8_payload, 0);
             if (text_obj) {
                 if (cell.fg.type == VTERM_COLOR_DEFAULT_FG) {
@@ -135,41 +123,48 @@ void render_terminal_cells(TerminalApp *app) {
             }
         }
     }
+
+    // --- LINUX 0.11 SPEC: NATIVE TEXT CURSOR CARET RENDERING ---
+    VTermPos cursor_pos;
+    vterm_state_get_cursorpos(vterm_obtain_state(app->vterm), &cursor_pos);
+    
+    // Create a smooth 500ms pulsing blink cycle using standard system ticks
+    if ((SDL_GetTicks() / 500) % 2 == 0) {
+        float cursor_x = (float)(cursor_pos.col * glyph_w);
+        float cursor_y = (float)(cursor_pos.row * glyph_h);
+        
+        SDL_FRect cursor_rect = { cursor_x, cursor_y, (float)glyph_w, (float)glyph_h };
+        
+        // Draw standard Adwaita accent cursor overlay block (Semi-translucent white)
+        SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, 140);
+        SDL_RenderFillRect(app->renderer, &cursor_rect);
+    }
+
     SDL_RenderPresent(app->renderer);
 }
 
 int main(int argc, char *argv[]) {
     TerminalApp app = { .running = true };
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
-        printf("[ERROR] SDL_Init failed: %s\n", SDL_GetError());
-        return -1;
-    }
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
     TTF_Init();
 
-    app.window = SDL_CreateWindow("ptx - zsh Engine", 720, 400, 0);
+    // CRITICAL: Passed SDL_WINDOW_RESIZABLE to unlock macOS window borders
+    app.window = SDL_CreateWindow("ptx - Resizable zsh Engine", 720, 400, SDL_WINDOW_RESIZABLE);
     app.renderer = SDL_CreateRenderer(app.window, NULL);
     
     app.font = TTF_OpenFont("/System/Library/Fonts/Supplemental/Courier New.ttf", FONT_SIZE);
-    if (!app.font) {
-        printf("[ERROR] Failed to load font!\n");
-        return -1;
-    }
     app.text_engine = TTF_CreateRendererTextEngine(app.renderer);
 
-    // CRITICAL CRITICAL FIX: SDL3 forces TextInput to be explicitly started per focus window.
-    // Without this, alphanumeric keys are completely eaten and ignored by the subsystem.
     SDL_StartTextInput(app.window);
-    printf("[DEBUG] Enabled SDL3 native TextInput engine routing paths.\n");
 
-    app.vterm = vterm_new(ROWS, COLS);
+    app.vterm = vterm_new(current_rows, current_cols);
     app.vts = vterm_obtain_screen(app.vterm);
     vterm_screen_set_callbacks(app.vts, &screen_callbacks, &app);
     vterm_screen_reset(app.vts, 1);
 
-    if (!spawn_native_zsh_process(&app)) {
-        return -1;
-    }
+    if (!spawn_native_zsh_process(&app)) return -1;
 
     SDL_Event event;
     while (app.running) {
@@ -177,32 +172,53 @@ int main(int argc, char *argv[]) {
             if (event.type == SDL_EVENT_QUIT) {
                 app.running = false;
             }
+            // --- DYNAMIC LAYOUT COMPUTATION AND RESIZE BRIDGE ---
+            else if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+                int w = event.window.data1;
+                int h = event.window.data2;
+
+                int glyph_w = 0, glyph_h = 0;
+                TTF_GetStringSize(app.font, "A", 0, &glyph_w, &glyph_h);
+
+                if (glyph_w > 0 && glyph_h > 0) {
+                    current_cols = w / glyph_w;
+                    current_rows = h / glyph_h;
+
+                    // Enforce structural minimum grids
+                    if (current_cols < 20) current_cols = 20;
+                    if (current_rows < 5)  current_rows = 5;
+
+                    // Sync inner virtual text matrices
+                    vterm_set_size(app.vterm, current_rows, current_cols);
+
+                    // Issue TIOCSWINSZ packet to force zsh text-wrapping re-calculations
+                    struct winsize ws = {
+                        .ws_row = (unsigned short)current_rows,
+                        .ws_col = (unsigned short)current_cols,
+                        .ws_xpixel = (unsigned short)w,
+                        .ws_ypixel = (unsigned short)h
+                    };
+                    ioctl(app.pty_master, TIOCSWINSZ, &ws);
+                }
+            }
             else if (event.type == SDL_EVENT_TEXT_INPUT) {
-                // Verified payload delivery: captures text input characters
-                // printf("[EVENT] Text Input received: '%s' (Length: %zu)\n", event.text.text, strlen(event.text.text));
                 write(app.pty_master, event.text.text, strlen(event.text.text));
             }
             else if (event.type == SDL_EVENT_KEY_DOWN) {
-                // Handled specifically for structural shell control symbols
                 if (event.key.key == SDLK_RETURN) {
-                    //printf("[EVENT] Return key mapped to master.\n");
                     write(app.pty_master, "\r", 1);
                 } else if (event.key.key == SDLK_BACKSPACE) {
-                    //printf("[EVENT] Backspace key mapped to master.\n");
                     write(app.pty_master, "\x7f", 1); 
                 }
             }
         }
         
         render_terminal_cells(&app);
-        SDL_Delay(8); // Targets standard 60-120fps clock cadences smoothly
+        SDL_Delay(8);
     }
 
-    // --- EXIT INTEGRATIONS ---
-    printf("[DEBUG] Terminating background targets and closing frames.\n");
     kill(app.shell_pid, SIGKILL); 
     close(app.pty_master);
-    
     vterm_free(app.vterm);
     TTF_DestroyRendererTextEngine(app.text_engine);
     TTF_CloseFont(app.font);
