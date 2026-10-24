@@ -5,10 +5,29 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <util.h>       // Contains macOS native forkpty() 
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <signal.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+
+/*
+ * forkpty() lives in <util.h> on macOS/BSD, but glibc (Linux) exposes it in
+ * <pty.h> instead. POSIX does not standardise a pty header, so pick the right
+ * one per platform.
+ */
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+#include <util.h>
+#elif defined(__linux__)
+#include <pty.h>
+#elif defined(__sun)
+#include <fcntl.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#else
+#include <pty.h>        /* best-effort fallback for other libc implementations */
+#endif
 
 // Mutable globals to hold active terminal grid size dimensions
 int current_cols = 80;
@@ -46,28 +65,76 @@ static int pty_read_worker(void *data) {
     
     while (app->running) {
         ssize_t bytes_read = read(app->pty_master, read_buffer, sizeof(read_buffer));
-        if (bytes_read <= 0) {
+        if (bytes_read < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                SDL_Delay(4);
+                continue;
+            }
             app->running = false;
             break;
         }
-        vterm_input_write(app->vterm, read_buffer, bytes_read);
+        if (bytes_read == 0) {
+            // EOF: the shell exited on its own.
+            app->running = false;
+            break;
+        }
+        vterm_input_write(app->vterm, read_buffer, (size_t)bytes_read);
     }
     return 0;
 }
 
 // --- 3. PROCESS SPAWNER ---
-bool spawn_native_zsh_process(TerminalApp *app) {
-    struct winsize ws = { .ws_row = current_rows, .ws_col = current_cols };
-    
+// Shells tried in order when no usable $SHELL is set.
+static const char *const fallback_shells[] = {
+    "/bin/zsh",
+    "/usr/bin/zsh",
+    "/bin/bash",
+    "/usr/bin/bash",
+    "/bin/sh",
+    NULL
+};
+
+static const char *pick_login_shell(void) {
+    const char *env_shell = getenv("SHELL");
+    if (env_shell && env_shell[0] == '/' && access(env_shell, X_OK) == 0) {
+        return env_shell;
+    }
+    for (size_t i = 0; fallback_shells[i]; i++) {
+        if (access(fallback_shells[i], X_OK) == 0) {
+            return fallback_shells[i];
+        }
+    }
+    return NULL;
+}
+
+bool spawn_native_shell_process(TerminalApp *app) {
+    struct winsize ws = {
+        .ws_row = (unsigned short)current_rows,
+        .ws_col = (unsigned short)current_cols
+    };
+
+    // Resolved in the parent: after forkpty() only async-signal-safe calls are kosher.
+    const char *shell = pick_login_shell();
+
     app->shell_pid = forkpty(&app->pty_master, NULL, NULL, &ws);
     if (app->shell_pid < 0) return false;
-    
+
     if (app->shell_pid == 0) {
         setenv("TERM", "xterm-256color", 1);
-        execl("/bin/zsh", "-l", NULL); 
-        exit(EXIT_FAILURE);
+        if (shell) {
+            execl(shell, shell, "-l", (char *)NULL);
+        }
+        execl("/bin/sh", "sh", (char *)NULL);
+        _exit(EXIT_FAILURE);
     }
-    
+
+    // Go non-blocking so the reader thread can observe app->running and the
+    // parent never hangs in read() during shutdown.
+    int flags = fcntl(app->pty_master, F_GETFL, 0);
+    if (flags != -1) {
+        fcntl(app->pty_master, F_SETFL, flags | O_NONBLOCK);
+    }
+
     app->read_thread = SDL_CreateThread(pty_read_worker, "PTY_Reader", app);
     return true;
 }
@@ -151,10 +218,19 @@ int main(int argc, char *argv[]) {
     TTF_Init();
 
     // CRITICAL: Passed SDL_WINDOW_RESIZABLE to unlock macOS window borders
-    app.window = SDL_CreateWindow("ptx - Resizable zsh Engine", 720, 400, SDL_WINDOW_RESIZABLE);
+    app.window = SDL_CreateWindow("ptx - Resizable Shell Engine", 720, 400, SDL_WINDOW_RESIZABLE);
     app.renderer = SDL_CreateRenderer(app.window, NULL);
-    
-    app.font = TTF_OpenFont("/System/Library/Fonts/Supplemental/Courier New.ttf", FONT_SIZE);
+
+#if defined(__APPLE__)
+    const char *font_path = "/System/Library/Fonts/Supplemental/Courier New.ttf";
+#else
+    const char *font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+#endif
+    app.font = TTF_OpenFont(font_path, FONT_SIZE);
+    if (!app.font) {
+        SDL_Log("Failed to load monospace font %s: %s", font_path, SDL_GetError());
+        return -1;
+    }
     app.text_engine = TTF_CreateRendererTextEngine(app.renderer);
 
     SDL_StartTextInput(app.window);
@@ -164,7 +240,7 @@ int main(int argc, char *argv[]) {
     vterm_screen_set_callbacks(app.vts, &screen_callbacks, &app);
     vterm_screen_reset(app.vts, 1);
 
-    if (!spawn_native_zsh_process(&app)) return -1;
+    if (!spawn_native_shell_process(&app)) return -1;
 
     SDL_Event event;
     while (app.running) {
@@ -217,8 +293,21 @@ int main(int argc, char *argv[]) {
         SDL_Delay(8);
     }
 
-    kill(app.shell_pid, SIGKILL); 
+    // Release the pty first: any in-flight read() in the worker returns EOF,
+    // letting the non-blocking loop exit immediately instead of spinning.
     close(app.pty_master);
+    if (app.read_thread) {
+        SDL_WaitThread(app.read_thread, NULL);
+        app.read_thread = NULL;
+    }
+    kill(app.shell_pid, SIGKILL);
+    // Non-blocking reap: a shell stuck in an uninterruptible sleep must not
+    // freeze application shutdown.
+    for (int attempt = 0; attempt < 100; attempt++) {
+        pid_t reaped = waitpid(app.shell_pid, NULL, WNOHANG);
+        if (reaped == app.shell_pid || reaped < 0) break;
+        SDL_Delay(10);
+    }
     vterm_free(app.vterm);
     TTF_DestroyRendererTextEngine(app.text_engine);
     TTF_CloseFont(app.font);
