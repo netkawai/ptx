@@ -222,15 +222,32 @@ int main(int argc, char *argv[]) {
     app.renderer = SDL_CreateRenderer(app.window, NULL);
 
 #if defined(__APPLE__)
-    const char *font_path = "/System/Library/Fonts/Supplemental/Courier New.ttf";
+    const char *font_candidates[] = {
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    };
 #else
-    const char *font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+    // Try a few common monospace font locations; first one that opens wins.
+    const char *font_candidates[] = {
+        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+    };
 #endif
-    app.font = TTF_OpenFont(font_path, FONT_SIZE);
+    const char *font_path = NULL;
+    for (size_t i = 0; i < sizeof(font_candidates) / sizeof(font_candidates[0]); i++) {
+        app.font = TTF_OpenFont(font_candidates[i], FONT_SIZE);
+        if (app.font) {
+            font_path = font_candidates[i];
+            break;
+        }
+    }
     if (!app.font) {
-        SDL_Log("Failed to load monospace font %s: %s", font_path, SDL_GetError());
+        SDL_Log("Failed to load a monospace font: %s", SDL_GetError());
         return -1;
     }
+    SDL_Log("Using font: %s", font_path);
     app.text_engine = TTF_CreateRendererTextEngine(app.renderer);
 
     SDL_StartTextInput(app.window);
