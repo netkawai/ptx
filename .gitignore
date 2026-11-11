@@ -1,0 +1,6 @@
+# CMake build tree
+/build/
+
+# Editor / OS noise
+.DS_Store
+*.o
