@@ -1,8 +1,55 @@
 #include "buffer.h"
+#include "adwaita.h"
 #include "cell.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* Adjustment owner                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The viewport is modelled the way a GtkScrolledWindow models one:
+ * `vadjustment` is the model, the scrollbar is its view. `value` counts
+ * lines scrolled up from the live screen, so lower = 0, upper = visible
+ * lines, page_size = screen rows.
+ */
+static void viewport_value_changed(PtxAdjustment *adj, void *user_data) {
+    TerminalApp *app = user_data;
+    (void)adj;
+
+    /* Keep the selection on the same text while the view moves (as GTK
+     * text views do), so copying still yields what the user highlighted. */
+    if (app->has_selection) {
+        double delta = ptx_adjustment_get_value(adj) - adj->old_value;
+        if (delta != 0.0) {
+            app->sel_start_row -= (int)delta;
+            app->sel_end_row   -= (int)delta;
+        }
+    }
+    app_mark_dirty(app);
+}
+
+void buffer_init(TerminalApp *app) {
+    app->vadjustment = ptx_adjustment_new(0.0, 0.0, 0.0, 1.0, 1.0, 0.0);
+    PtxAdjustmentClass klass = { .changed = NULL,
+                                 .value_changed = viewport_value_changed };
+    ptx_adjustment_connect(app->vadjustment, klass, app);
+}
+
+void buffer_set_viewport(TerminalApp *app, int rows) {
+    int lines = app->sb.len + rows;
+
+    /* `value` keeps counting lines above the bottom, so it stays valid
+     * across the resize; the upper bound is what moves. */
+    ptx_adjustment_configure(app->vadjustment,
+                             ptx_adjustment_get_value(app->vadjustment),
+                             0.0, (double)lines,
+                             1.0, rows > 1 ? (double)(rows - 1) : 1.0,
+                             (double)rows);
+    ptx_adjustment_clamp_page(app->vadjustment, 0.0, (double)rows);
+}
 
 /* ------------------------------------------------------------------ */
 /* Scrollback ring                                                     */
@@ -15,9 +62,22 @@ static void sb_trim(TerminalApp *app) {
         memmove(&sb->lines[0], &sb->lines[1],
                 (size_t)(sb->len - 1) * sizeof(SbLine));
         sb->len--;
-        if (app->scroll_offset > 0) app->scroll_offset--;
+        /* The dropped line is the oldest one, i.e. the top of the range:
+         * it disappears from under a scrolled-up viewport, so keep the same
+         * text on screen by dropping the offset to match. */
+        viewport_offset_clamp(app);
     }
-    if (app->scroll_offset > sb->len) app->scroll_offset = sb->len;
+}
+
+void viewport_offset_clamp(TerminalApp *app) {
+    if (!app->vadjustment) return;
+    /* Reconfiguring re-clamps `value` against the new upper bound. */
+    ptx_adjustment_configure(app->vadjustment,
+                             ptx_adjustment_get_value(app->vadjustment),
+                             0.0, (double)(app->sb.len + app->rows),
+                             ptx_adjustment_get_step_increment(app->vadjustment),
+                             ptx_adjustment_get_page_increment(app->vadjustment),
+                             ptx_adjustment_get_page_size(app->vadjustment));
 }
 
 void buffer_push_line(TerminalApp *app, int cols, const VTermScreenCell *cells) {
@@ -34,9 +94,11 @@ void buffer_push_line(TerminalApp *app, int cols, const VTermScreenCell *cells) 
     for (int i = 0; i < cols; i++)
         cell_from_screen(app, &line->cells[i], &cells[i]);
 
-    /* Keep the visible content anchored while scrolled up. */
-    if (app->scroll_offset > 0) app->scroll_offset++;
     sb_trim(app);
+
+    /* A line pushed off the top extends the reachable distance from the
+     * bottom by one, which keeps the visible text anchored. */
+    viewport_offset_clamp(app);
 }
 
 bool buffer_pop_line(TerminalApp *app, int cols, VTermScreenCell *cells) {
@@ -56,8 +118,7 @@ bool buffer_pop_line(TerminalApp *app, int cols, VTermScreenCell *cells) {
         if (s->flags & F_REVERSE)   cells[i].attrs.reverse = 1;
     }
     free(line->cells);
-    if (app->scroll_offset > 0) app->scroll_offset--;
-    if (app->scroll_offset > sb->len) app->scroll_offset = sb->len;
+    viewport_offset_clamp(app);
     return true;
 }
 
@@ -65,7 +126,8 @@ void buffer_clear(TerminalApp *app) {
     Scrollback *sb = &app->sb;
     for (int i = 0; i < sb->len; i++) free(sb->lines[i].cells);
     sb->len = 0;
-    app->scroll_offset = 0;
+    ptx_adjustment_set_value(app->vadjustment, 0.0);
+    viewport_offset_clamp(app);
 }
 
 void buffer_free(TerminalApp *app) {
@@ -73,23 +135,38 @@ void buffer_free(TerminalApp *app) {
     free(app->sb.lines);
     app->sb.lines = NULL;
     app->sb.cap = 0;
+    ptx_adjustment_unref(app->vadjustment);
+    app->vadjustment = NULL;
 }
 
 /* ------------------------------------------------------------------ */
 /* Viewport                                                            */
 /* ------------------------------------------------------------------ */
 
+int viewport_offset(TerminalApp *app) {
+    return (int)ptx_adjustment_get_value(app->vadjustment);
+}
+
 void scroll_set(TerminalApp *app, int offset) {
-    if (offset < 0) offset = 0;
-    if (offset > app->sb.len) offset = app->sb.len;
-    if (offset != app->scroll_offset) {
-        app->scroll_offset = offset;
-        app_mark_dirty(app);
-    }
+    /* Offset counts lines up from the bottom; the adjustment clamps it to
+     * [0, history]. */
+    ptx_adjustment_set_value(app->vadjustment, (double)offset);
 }
 
 void scroll_by(TerminalApp *app, int delta) {
-    scroll_set(app, app->scroll_offset + delta);
+    scroll_set(app, viewport_offset(app) + delta);
+}
+
+void scroll_to_end(TerminalApp *app) {
+    scroll_set(app, 0);
+}
+
+void scroll_to_start(TerminalApp *app) {
+    /* The oldest reachable line: the top edge of the last page. */
+    double max_value = ptx_adjustment_get_upper(app->vadjustment) -
+                       ptx_adjustment_get_page_size(app->vadjustment);
+    if (max_value < 0.0) max_value = 0.0;
+    ptx_adjustment_set_value(app->vadjustment, max_value);
 }
 
 int row_width(TerminalApp *app, int index) {

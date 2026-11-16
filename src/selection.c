@@ -82,5 +82,5 @@ void paste_clipboard(TerminalApp *app) {
 
     if (n > 0) terminal_write(app, text, n);
     SDL_free(text);
-    scroll_set(app, 0);
+    scroll_to_end(app);
 }

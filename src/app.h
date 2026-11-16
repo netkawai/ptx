@@ -10,6 +10,9 @@
 #include <SDL3_ttf/SDL_ttf.h>
 #include <vterm.h>
 
+typedef struct PtxAdjustment PtxAdjustment;
+typedef struct PtxScrollbar  PtxScrollbar;
+
 /* ---- Tunables ---------------------------------------------------- */
 #define FONT_SIZE      16.0f
 #define SCROLLBAR_W    12        /* reserved gutter on the right edge */
@@ -69,7 +72,11 @@ typedef struct {
     SDL_AtomicInt    dirty;
 
     Scrollback       sb;
-    int              scroll_offset;   /* lines scrolled up from the bottom */
+    /* Model for the viewport. `value` is the number of lines scrolled up
+     * from the live screen: 0 = bottom (live), upper - page_size = oldest.
+     * upper = scrollback lines + screen rows, page_size = screen rows. */
+    PtxAdjustment   *vadjustment;
+    PtxScrollbar    *vscrollbar;
 
     /* Selection is stored in absolute "combined buffer" coordinates
      * (scrollback lines first, then the live screen rows) so it stays put
@@ -78,8 +85,6 @@ typedef struct {
     bool             selecting;
     int              sel_start_row, sel_start_col;
     int              sel_end_row,   sel_end_col;
-
-    bool             dragging_scrollbar;
 
     bool             alt_held;
 

@@ -3,6 +3,20 @@
 
 #include "app.h"
 
+/* ---- Viewport model ---------------------------------------------- */
+
+/* Create the adjustment that models the viewport. */
+void buffer_init(TerminalApp *app);
+
+/* Set the page size (screen rows) and the range (history + screen). */
+void buffer_set_viewport(TerminalApp *app, int rows);
+
+/* Re-clamp the value after the amount of history changed. */
+void viewport_offset_clamp(TerminalApp *app);
+
+/* Current scroll offset in lines up from the bottom. */
+int viewport_offset(TerminalApp *app);
+
 /* ---- Scrollback ring --------------------------------------------- */
 
 /* Store one scrolled-off line (called from the libvterm sb_pushline hook). */
@@ -20,11 +34,15 @@ void buffer_free(TerminalApp *app);
 
 /* ---- Viewport over scrollback + live screen ---------------------- */
 
-/* Set the scroll offset (lines up from the bottom), clamped to the history. */
+/* Set the scroll offset (lines up from the bottom). */
 void scroll_set(TerminalApp *app, int offset);
 
 /* Adjust the scroll offset by delta. */
 void scroll_by(TerminalApp *app, int delta);
+
+/* Jump to the live screen (offset 0) or to the oldest line. */
+void scroll_to_end(TerminalApp *app);
+void scroll_to_start(TerminalApp *app);
 
 /* Number of columns a given combined-buffer row actually holds. */
 int row_width(TerminalApp *app, int index);

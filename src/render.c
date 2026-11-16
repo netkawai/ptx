@@ -1,40 +1,12 @@
 #include "render.h"
 #include "buffer.h"
 #include "menu.h"
+#include "scrollbar.h"
 #include "selection.h"
 #include "strutil.h"
 
-static void draw_scrollbar(TerminalApp *app) {
-    int trackH = app->win_h;
-    int x = app->win_w - SCROLLBAR_W;
-    if (x < 0) return;
-
-    SDL_SetRenderDrawColor(app->renderer, 45, 45, 45, 255);
-    SDL_FRect track = { (float)x, 0.0f, (float)SCROLLBAR_W, (float)trackH };
-    SDL_RenderFillRect(app->renderer, &track);
-
-    int H = app->sb.len;
-    if (H <= 0) return;   /* nothing to scroll: no thumb */
-
-    int L = H + app->rows;
-    float viewFrac = (float)app->rows / (float)L;
-    float thumbH = viewFrac * trackH;
-    if (thumbH < 24.0f) thumbH = 24.0f;
-    if (thumbH > trackH) thumbH = (float)trackH;
-
-    float startFrac = (float)(H - app->scroll_offset) / (float)L;
-    float thumbY = startFrac * trackH;
-    if (thumbY + thumbH > trackH) thumbY = trackH - thumbH;
-    if (thumbY < 0) thumbY = 0;
-
-    SDL_SetRenderDrawColor(app->renderer, 130, 130, 130, 255);
-    SDL_FRect thumb = { (float)x + 2.0f, thumbY,
-                        (float)SCROLLBAR_W - 4.0f, thumbH };
-    SDL_RenderFillRect(app->renderer, &thumb);
-}
-
 static void draw_cursor(TerminalApp *app, bool blink_on) {
-    if (app->scroll_offset != 0 || !blink_on) return;
+    if (viewport_offset(app) != 0 || !blink_on) return;
 
     VTermPos cur;
     vterm_state_get_cursorpos(vterm_obtain_state(app->vterm), &cur);
@@ -56,7 +28,7 @@ void render_terminal_cells(TerminalApp *app) {
     if (gw > 0 && gh > 0) {
         SDL_LockMutex(app->vterm_lock);
 
-        int start = app->sb.len - app->scroll_offset;
+        int start = app->sb.len - viewport_offset(app);
         if (start < 0) start = 0;
 
         for (int row = 0; row < app->rows; row++) {
@@ -120,7 +92,8 @@ void render_terminal_cells(TerminalApp *app) {
         SDL_UnlockMutex(app->vterm_lock);
     }
 
-    draw_scrollbar(app);
+    if (app->vscrollbar)
+        ptx_scrollbar_render(app->vscrollbar, app->renderer);
 
     static bool blink_state = true;
     bool blink_on = (SDL_GetTicks() / 500) % 2 == 0;

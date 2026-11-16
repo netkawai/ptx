@@ -4,6 +4,7 @@
 #include "layout.h"
 #include "menu.h"
 #include "render.h"
+#include "scrollbar.h"
 #include "selection.h"
 #include "terminal.h"
 
@@ -12,6 +13,32 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+/* Scrollbar drag state, kept here so the widget stays application-agnostic. */
+static struct {
+    bool   active;
+    float  start_x, start_y;
+    double start_value;
+} sb_drag;
+
+static void scrollbar_begin_drag(TerminalApp *app, float mx, float my) {
+    if (!app->vscrollbar) return;
+    sb_drag.active = true;
+    sb_drag.start_x = mx;
+    sb_drag.start_y = my;
+    sb_drag.start_value = ptx_range_get_value(&app->vscrollbar->range);
+    app->vscrollbar->dragging = true;
+    app->vscrollbar->fine_tune = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+    app_mark_dirty(app);
+}
+
+static void scrollbar_end_drag(TerminalApp *app) {
+    if (!app->vscrollbar) return;
+    sb_drag.active = false;
+    app->vscrollbar->dragging = false;
+    app->vscrollbar->fine_tune = false;
+    app_mark_dirty(app);
+}
 
 static void handle_event(TerminalApp *app, const SDL_Event *event) {
     switch (event->type) {
@@ -26,7 +53,7 @@ static void handle_event(TerminalApp *app, const SDL_Event *event) {
     case SDL_EVENT_TEXT_INPUT:
         if (app->alt_held) terminal_write(app, "\x1b", 1);
         terminal_write(app, event->text.text, strlen(event->text.text));
-        scroll_set(app, 0);
+        scroll_to_end(app);
         break;
 
     case SDL_EVENT_KEY_DOWN:
@@ -49,7 +76,7 @@ static void handle_event(TerminalApp *app, const SDL_Event *event) {
         if (app->menu_visible)
             menu_close(app);
         else
-            scroll_by(app, (int)(event->wheel.y * 3.0f));
+            scroll_view_wheel(app, event->wheel.y);
         break;
 
     case SDL_EVENT_MOUSE_BUTTON_DOWN: {
@@ -75,9 +102,15 @@ static void handle_event(TerminalApp *app, const SDL_Event *event) {
             }
             /* hit == -2: on the frame padding, keep it open */
         } else if (event->button.button == SDL_BUTTON_LEFT) {
-            if (mx >= app->win_w - SCROLLBAR_W) {
-                app->dragging_scrollbar = true;
-                scrollbar_jump_to(app, my);
+            if (app->vscrollbar && ptx_scrollbar_hit(app->vscrollbar, mx, my)) {
+                /* GtkRange: press on the slider starts a drag, press on the
+                 * trough pages towards the click. */
+                if (ptx_scrollbar_hit_slider(app->vscrollbar, mx, my)) {
+                    scrollbar_begin_drag(app, mx, my);
+                } else {
+                    ptx_scrollbar_click_trough(app->vscrollbar, mx, my);
+                    app_mark_dirty(app);
+                }
             } else {
                 int row, col;
                 mouse_to_cell(app, mx, my, &row, &col);
@@ -95,8 +128,8 @@ static void handle_event(TerminalApp *app, const SDL_Event *event) {
         if (app->menu_ignore_up) {
             app->menu_ignore_up = false;   /* release of the opening click */
         } else if (event->button.button == SDL_BUTTON_LEFT) {
-            if (app->dragging_scrollbar) {
-                app->dragging_scrollbar = false;
+            if (sb_drag.active) {
+                scrollbar_end_drag(app);
             } else if (app->selecting) {
                 app->selecting = false;
                 if (app->has_selection) copy_selection(app);
@@ -106,6 +139,16 @@ static void handle_event(TerminalApp *app, const SDL_Event *event) {
 
     case SDL_EVENT_MOUSE_MOTION: {
         float mx = event->motion.x, my = event->motion.y;
+
+        /* Adwaita's `.hovering` class: widen the slider under the pointer. */
+        if (app->vscrollbar) {
+            bool hovering = ptx_scrollbar_hit(app->vscrollbar, mx, my);
+            if (hovering != app->vscrollbar->hovering) {
+                app->vscrollbar->hovering = hovering;
+                app_mark_dirty(app);
+            }
+        }
+
         if (app->menu_visible) {
             int hit = menu_hit(app, mx, my);
             int hover = (hit >= 0) ? hit : -1;
@@ -113,8 +156,10 @@ static void handle_event(TerminalApp *app, const SDL_Event *event) {
                 app->menu_hover = hover;
                 app_mark_dirty(app);
             }
-        } else if (app->dragging_scrollbar) {
-            scrollbar_jump_to(app, my);
+        } else if (sb_drag.active) {
+            app->vscrollbar->fine_tune = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+            ptx_scrollbar_drag(app->vscrollbar, sb_drag.start_x, sb_drag.start_y,
+                               mx, my, sb_drag.start_value);
         } else if (app->selecting && (event->motion.state & SDL_BUTTON_LMASK)) {
             int row, col;
             mouse_to_cell(app, mx, my, &row, &col);
@@ -171,9 +216,9 @@ static void shutdown_app(TerminalApp *app) {
         SDL_Delay(10);
     }
 
+    layout_free(app);
     buffer_free(app);
-    vterm_free(app->vterm);
-    TTF_DestroyRendererTextEngine(app->text_engine);
+    vterm_free(app->vterm);    TTF_DestroyRendererTextEngine(app->text_engine);
     TTF_CloseFont(app->font);
     TTF_Quit();
     SDL_DestroyRenderer(app->renderer);
@@ -212,6 +257,11 @@ int main(int argc, char *argv[]) {
     app.vts = vterm_obtain_screen(app.vterm);
     vterm_screen_set_callbacks(app.vts, &ptx_screen_callbacks, &app);
     vterm_screen_reset(app.vts, 1);
+
+    /* The viewport adjustment must exist before the layout pass, which sizes
+     * it and allocates the scrollbar that visualises it. */
+    buffer_init(&app);
+    layout_init(&app);
 
     if (!terminal_spawn(&app))
         return -1;

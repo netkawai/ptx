@@ -45,6 +45,11 @@ add_executable(ptx
   src/render.c
   src/input.c
   src/layout.c
+  src/adjustment.c
+  src/orientable.c
+  src/range.c
+  src/scrollbar.c
+  src/sdl_private.c
 )
 
 target_include_directories(ptx PRIVATE src)
@@ -87,3 +92,21 @@ if(APPLE)
 endif()
 
 install(TARGETS ptx RUNTIME DESTINATION bin)
+
+# ---- Tests --------------------------------------------------------
+# Widget model tests (adjustment / range / scrollbar) need no window.
+enable_testing()
+add_executable(test_widgets
+  tests/test_widgets.c
+  src/adjustment.c
+  src/orientable.c
+  src/range.c
+  src/scrollbar.c
+  src/sdl_private.c
+)
+target_include_directories(test_widgets PRIVATE src)
+target_link_libraries(test_widgets PRIVATE ${PTX_SDL3} m)
+if(NOT MSVC)
+  target_compile_options(test_widgets PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME widgets COMMAND test_widgets)

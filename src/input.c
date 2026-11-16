@@ -1,26 +1,31 @@
 #include "input.h"
 #include "buffer.h"
+#include "scrollbar.h"
 #include "selection.h"
 #include "terminal.h"
 
 #include <string.h>
 
 void mouse_to_cell(TerminalApp *app, float mx, float my, int *row, int *col) {
-    int start = app->sb.len - app->scroll_offset;
+    int start = app->sb.len - viewport_offset(app);
     if (start < 0) start = 0;
     *row = start + (app->glyph_h > 0 ? (int)(my / app->glyph_h) : 0);
     *col = app->glyph_w > 0 ? (int)(mx / app->glyph_w) : 0;
 }
 
-void scrollbar_jump_to(TerminalApp *app, float my) {
-    int trackH = app->win_h;
-    if (trackH <= 0) return;
-    float frac = my / trackH;
-    if (frac < 0) frac = 0;
-    if (frac > 1) frac = 1;
-    int L = app->sb.len + app->rows;
-    int offset = app->sb.len - (int)(frac * L);
-    scroll_set(app, offset);
+void scroll_view_wheel(TerminalApp *app, double wheel_y) {
+    PtxAdjustment *adj = app->vadjustment;
+    if (!adj || wheel_y == 0.0) return;
+
+    /* GTK4 scrolls `min(3 * step, page * 0.9)` per wheel notch, so a wheel
+     * tick works on a small page as well as a large one. */
+    double step = 3.0 * ptx_adjustment_get_step_increment(adj);
+    double page = ptx_adjustment_get_page_increment(adj) * 0.9;
+    if (step > page) step = page;
+    if (step < 1.0) step = 1.0;
+
+    double value = ptx_adjustment_get_value(adj) + wheel_y * step;
+    ptx_adjustment_set_value(adj, value);
 }
 
 bool handle_key(TerminalApp *app, SDL_Keycode key, SDL_Keymod mod) {
@@ -42,11 +47,11 @@ bool handle_key(TerminalApp *app, SDL_Keycode key, SDL_Keymod mod) {
     /* Shift+PageUp/Down and Shift+Home/End scroll the viewport. */
     if (shift && key == SDLK_PAGEUP)   { scroll_by(app, app->rows - 1);  return true; }
     if (shift && key == SDLK_PAGEDOWN) { scroll_by(app, -(app->rows - 1)); return true; }
-    if (shift && key == SDLK_HOME)     { scroll_set(app, app->sb.len);   return true; }
-    if (shift && key == SDLK_END)      { scroll_set(app, 0);             return true; }
+    if (shift && key == SDLK_HOME)     { scroll_to_start(app);           return true; }
+    if (shift && key == SDLK_END)      { scroll_to_end(app);             return true; }
 
     /* Any other key snaps the view back to the live screen. */
-    if (app->scroll_offset != 0) scroll_set(app, 0);
+    if (viewport_offset(app) != 0) scroll_to_end(app);
 
     const char *seq = NULL;
     switch (key) {

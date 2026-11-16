@@ -1,6 +1,20 @@
 #include "layout.h"
+#include "buffer.h"
+#include "scrollbar.h"
 
 #include <sys/ioctl.h>
+
+void layout_init(TerminalApp *app) {
+    app->vscrollbar = ptx_scrollbar_new(PTX_ORIENTATION_VERTICAL,
+                                        app->vadjustment);
+    if (app->vscrollbar)
+        ptx_range_set_increments(&app->vscrollbar->range, 1.0, 1.0);
+}
+
+void layout_free(TerminalApp *app) {
+    ptx_scrollbar_free(app->vscrollbar);
+    app->vscrollbar = NULL;
+}
 
 void recompute_layout(TerminalApp *app, int w, int h) {
     app->win_w = w;
@@ -28,6 +42,17 @@ void recompute_layout(TerminalApp *app, int w, int h) {
         .ws_ypixel = (unsigned short)h,
     };
     ioctl(app->pty_master, TIOCSWINSZ, &ws);
+
+    /* The scrollbar lives in the right gutter; `page_size` is the number of
+     * rows on screen, so the slider covers exactly the visible portion. */
+    buffer_set_viewport(app, rows);
+    if (app->vscrollbar) {
+        ptx_range_set_increments(&app->vscrollbar->range, 1.0,
+                                 rows > 1 ? (double)(rows - 1) : 1.0);
+        ptx_scrollbar_allocate(app->vscrollbar,
+                               (float)(w - SCROLLBAR_W), 0.0f,
+                               (float)SCROLLBAR_W, (float)h);
+    }
 
     /* Geometry changed: stored selection coordinates no longer make sense. */
     app->has_selection = false;
