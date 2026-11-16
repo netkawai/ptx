@@ -183,8 +183,10 @@ static bool load_font(TerminalApp *app) {
     };
 #else
     static const char *const candidates[] = {
-        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+        /* Prefer faces with the full box-drawing and block set: TUIs like
+         * opencode lean on U+2500..U+259F for their whole layout. */
         "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",

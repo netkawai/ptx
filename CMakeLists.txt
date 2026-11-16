@@ -45,6 +45,7 @@ add_executable(ptx
   src/render.c
   src/input.c
   src/layout.c
+  src/boxdraw.c
   src/adjustment.c
   src/orientable.c
   src/range.c
@@ -110,3 +111,11 @@ if(NOT MSVC)
   target_compile_options(test_widgets PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME widgets COMMAND test_widgets)
+
+add_executable(test_boxdraw tests/test_boxdraw.c src/boxdraw.c)
+target_include_directories(test_boxdraw PRIVATE src)
+target_link_libraries(test_boxdraw PRIVATE ${PTX_SDL3})
+if(NOT MSVC)
+  target_compile_options(test_boxdraw PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME boxdraw COMMAND test_boxdraw)

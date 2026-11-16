@@ -1,4 +1,5 @@
 #include "render.h"
+#include "boxdraw.h"
 #include "buffer.h"
 #include "menu.h"
 #include "scrollbar.h"
@@ -69,6 +70,16 @@ void render_terminal_cells(TerminalApp *app) {
                 }
 
                 if (cell.chars[0] == 0 || cell.width == 0) continue;
+
+                /* Box-drawing, block and braille cells are drawn as
+                 * geometry so they line up with the cell grid and join
+                 * across cells; fonts cannot guarantee either. */
+                uint32_t fg_rgb = ((uint32_t)fr << 16) | ((uint32_t)fg << 8) | fb;
+                if (boxdraw_has_codepoint(cell.chars[0])) {
+                    boxdraw_draw(app->renderer, cell.chars[0], x, y,
+                                 (float)gw, (float)gh, fg_rgb);
+                    continue;
+                }
 
                 char utf8_payload[32] = {0};
                 int offset = 0;
