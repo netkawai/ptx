@@ -256,6 +256,11 @@ int main(int argc, char *argv[]) {
     SDL_StartTextInput(app.window);
 
     app.vterm = vterm_new(app.rows, app.cols);
+    /* TERM is xterm-256color, so the application emits UTF-8. Without this
+     * libvterm defaults to non-UTF-8, decodes each byte of a multi-byte
+     * glyph through the 94-character GL charset, and the box-drawing
+     * glyphs of any ratatui/opencode-style TUI come out as stray 'b's. */
+    vterm_set_utf8(app.vterm, 1);
     app.vts = vterm_obtain_screen(app.vterm);
     vterm_screen_set_callbacks(app.vts, &ptx_screen_callbacks, &app);
     vterm_screen_reset(app.vts, 1);

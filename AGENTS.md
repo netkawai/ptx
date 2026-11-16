@@ -16,7 +16,8 @@ Linux (including Wayland) and macOS.
 ```
 
 Dependencies are resolved through CMake config packages, falling back to
-pkg-config: **SDL3**, **SDL3_ttf**, and **libvterm**. A plain CMake build works
+pkg-config: **SDL3** and **SDL3_ttf**. **libvterm** is vendored under
+`libvterm/` (MIT) and built as a shared library. A plain CMake build works
 too:
 
 ```sh
@@ -38,6 +39,7 @@ cmake -S . -B build && cmake --build build -j
 | Layout / metrics | `src/layout.c` |
 | String helpers | `src/strutil.c` |
 | Build helpers | `scripts/`, `CMakeLists.txt` |
+| Vendored libvterm (MIT, own target) | `libvterm/` |
 
 ## Conventions
 
@@ -50,6 +52,9 @@ cmake -S . -B build && cmake --build build -j
 - Scrollback cells use the compact `SbCell`, not a full `VTermScreenCell`.
 - Prefer small, focused changes; keep platform-specific code guarded
   (`#ifdef __APPLE__`, `APPLE` in CMake).
+- Do not edit `libvterm/`; it is upstream MIT code kept byte-for-byte in its
+  own directory. Patches belong in ptx's own sources, or are documented in
+  `libvterm/README.md` as a deliberate local change.
 
 ## Verification
 

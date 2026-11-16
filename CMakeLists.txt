@@ -31,7 +31,9 @@ else()
   set(PTX_SDL3_TTF PkgConfig::SDL3_TTF)
 endif()
 
-pkg_check_modules(VTERM REQUIRED IMPORTED_TARGET vterm)
+# libvterm is vendored (MIT, see libvterm/README.md) and built here as a
+# shared library; ptx links against it rather than compiling it in.
+add_subdirectory(libvterm)
 
 # ---- Target -------------------------------------------------------
 add_executable(ptx
@@ -58,7 +60,7 @@ target_include_directories(ptx PRIVATE src)
 target_link_libraries(ptx PRIVATE
   ${PTX_SDL3}
   ${PTX_SDL3_TTF}
-  PkgConfig::VTERM
+  vterm
   Threads::Threads
 )
 
@@ -69,27 +71,6 @@ endif()
 
 if(NOT MSVC)
   target_compile_options(ptx PRIVATE -Wall -Wextra -Wno-unused-parameter)
-endif()
-
-# Ensure libraries found under a non-default prefix (e.g. libvterm in
-# ~/.local/lib) are located at runtime on ELF platforms.
-set_target_properties(ptx PROPERTIES
-  BUILD_RPATH "${VTERM_LIBRARY_DIRS}"
-  INSTALL_RPATH "${VTERM_LIBRARY_DIRS}"
-)
-
-# macOS: repair absolute dylib install names. Some libraries (notably libvterm)
-# record an install name like /usr/local/lib/libvterm.0.dylib even when they
-# live under another prefix; dyld resolves absolute names directly, so rpath
-# does not help and the binary fails at launch. See the script for details.
-if(APPLE)
-  string(REPLACE ";" " " PTX_VTERM_LIB_DIRS "${VTERM_LIBRARY_DIRS}")
-  add_custom_command(TARGET ptx POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E env
-            "VTERM_LIBRARY_DIRS=${PTX_VTERM_LIB_DIRS}"
-            /bin/sh "${CMAKE_CURRENT_SOURCE_DIR}/scripts/fix-macos-install-names.sh"
-            "$<TARGET_FILE:ptx>"
-    VERBATIM)
 endif()
 
 install(TARGETS ptx RUNTIME DESTINATION bin)
@@ -119,3 +100,12 @@ if(NOT MSVC)
   target_compile_options(test_boxdraw PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME boxdraw COMMAND test_boxdraw)
+
+# Terminal-engine tests: UTF-8/box-glyph decoding through the vendored
+# libvterm. Needs no window; this is the "stray b" regression test.
+add_executable(test_utf8 tests/test_utf8.c)
+target_link_libraries(test_utf8 PRIVATE vterm)
+if(NOT MSVC)
+  target_compile_options(test_utf8 PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME utf8 COMMAND test_utf8)

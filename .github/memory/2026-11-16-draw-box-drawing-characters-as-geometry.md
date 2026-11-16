@@ -30,6 +30,12 @@ Measured causes, in order of severity:
 No font choice fixes (2) and (3) reliably; they are a mismatch between text
 metrics and a fixed terminal grid.
 
+> **Update:** the stray `b` glyphs in the original report had a different,
+> earlier cause — libvterm was not running in UTF-8 mode, so the box glyphs
+> were never decoded to U+2500..U+257F and never reached `boxdraw` at all.
+> See `2026-11-16-libvterm-must-run-in-utf8-mode.md`. The procedural
+> rendering below is still correct and still needed.
+
 ## Decision
 
 Render U+2500–U+257F (box drawing), U+2580–U+259F (block elements) and
